@@ -1,22 +1,24 @@
 package main
 
 import (
+	"os"
+	"strconv"
 	_ "turbo/client"
 	"turbo/server"
 )
 
-var (
-	defaultTcpConfig = &server.TcpConfig{}
-)
-
-func getTcpServerConfig(file string) *server.TcpConfig {
-	return nil
-}
-
 func main() {
+	p := os.Getenv("TURBO_PORT")
+	port, err := strconv.ParseInt(p, 10, 64)
+	if err != nil {
+		port = 0
+	}
 	config := &server.TcpConfig{
-		Host: "0.0.0.0",
-		Port: 8000,
+		Host: os.Getenv("TURBO_HOST"),
+		Port: int(port),
+	}
+	if err := config.Check(); err != nil {
+		panic(err)
 	}
 	srv, err := server.NewServer(server.ProtoTCP, config)
 	if err != nil {

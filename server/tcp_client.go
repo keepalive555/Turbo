@@ -51,7 +51,7 @@ func newTcpClient(conn net.Conn, tcpSrv *TcpServer) *TcpClient {
 	}
 	runtime.SetFinalizer(client, finalizer)
 	// 关闭tcp连接Nagle算法，防止Nagle+Delayed ACK出现小数据Write-Write-Read的问题
-	tcpClient.conn.SetNoDelay(true)
+	client.conn.SetNoDelay(true)
 	// 开启tcp keepalive功能
 	return client
 }
@@ -239,8 +239,8 @@ func (tcpClient *TcpClient) handleCSTalk() error {
 	// 检测客户端同步的认证方法，Server端是否支持
 	var method byte = NoAcceptableMethods
 	for i := 0; i < n; i++ {
-		if methods[i] == tcpClient.AuthMethod {
-			method = tcpClient.AuthMethod
+		if methods[i] == tcpClient.authMethod {
+			method = tcpClient.authMethod
 			break
 		}
 	}
