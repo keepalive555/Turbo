@@ -5,6 +5,14 @@ import (
 	"turbo/server"
 )
 
+var (
+	defaultTcpConfig = &server.TcpConfig{}
+)
+
+func getTcpServerConfig(file string) *server.TcpConfig {
+	return nil
+}
+
 func main() {
 	config := &server.TcpConfig{
 		Host: "0.0.0.0",

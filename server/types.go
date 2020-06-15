@@ -13,12 +13,13 @@ const (
 var (
 	BadArguments         = errors.New("bad arguments")
 	UnknownProto         = errors.New("unknown proto")
-	OperationAlreadyDone = errors.New("operation already done")
 	BadRequest           = errors.New("bad request")
+	ServerAlreadyStarted = errors.New("server already started")
+	ServerAlreadyStopped = errors.New("server already stopped")
 )
 
 const (
-	MagicVersion byte = 0x05
+	MagicVersion byte = 0x05 // Socks5协议魔数
 )
 
 const (

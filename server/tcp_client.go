@@ -9,14 +9,16 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 const (
-	MaxMethodCount = 0xff // Socks5协议最多支持255种认证方法
-	IPv4Size       = 0x04 // IPv4地址4字节
-	IPv6Size       = 0x10 // IPv6地址16字节
-	PortSize       = 0x02 // 端口号2字节
+	MaxMethodSize = 0xff // Socks5协议最多支持255种认证方法
+	IPv4Size      = 0x04 // IPv4地址4字节
+	IPv6Size      = 0x10 // IPv6地址16字节
+	PortSize      = 0x02 // 端口号2字节
 )
 
 // 状态
@@ -30,48 +32,53 @@ const (
 )
 
 type TcpClient struct {
-	tcpSrv        *TcpServer   // Tcp服务器
-	conn          *net.TCPConn // tcp连接
-	err           error        // 客户端lastErr
-	status        int          // 客户端状态
-	remoteAddress string       // 远程地址
-	remoteConn    net.Conn     // 远程连接
-}
-
-// 析构函数
-func finalizer(obj *TcpClient) {
-	obj.Close()
+	tcpSrv        *TcpServer     // tcp服务器
+	conn          *net.TCPConn   // tcp连接
+	err           unsafe.Pointer // 客户端lastErr
+	authMethod    byte           // 认证方法
+	status        int            // 客户端状态
+	remoteAddress string         // 远程地址
+	remoteConn    net.Conn       // 远程连接
 }
 
 // 新建Tcp客户端
 func newTcpClient(conn net.Conn, tcpSrv *TcpServer) *TcpClient {
 	client := &TcpClient{
-		conn:   conn.(*net.TCPConn),
-		tcpSrv: tcpSrv,
+		conn:       conn.(*net.TCPConn),
+		tcpSrv:     tcpSrv,
+		err:        nil,
+		authMethod: NoAuthorization,
 	}
-	client.init()
 	runtime.SetFinalizer(client, finalizer)
+	// 关闭tcp连接Nagle算法，防止Nagle+Delayed ACK出现小数据Write-Write-Read的问题
+	tcpClient.conn.SetNoDelay(true)
+	// 开启tcp keepalive功能
 	return client
 }
 
-// 初始化
-func (tcpClient *TcpClient) init() {
-	// 关闭连接Nagle算法，防止Nagle+Delayed ACK出现小数据Write-Write-Read的问题
-	tcpClient.conn.SetNoDelay(true)
-	// 开启TCP保活机制：代理无法干预业务层数据，无法使用业务数据做保活
+// 获取客户端错误
+func (tcpClient *TcpClient) LastErr() error {
+	p := atomic.LoadPointer(&tcpClient.err)
+	if p == nil {
+		return nil
+	}
+	return *(*error)(p)
 }
 
-// 记录最后的Error
-func (tcpClient *TcpClient) LastErr() error {
-	return tcpClient.err
+// 设置客户端错误
+func (tcpClient *TcpClient) setErr(i interface{}) {
+	atomic.StorePointer(&tcpClient.err, unsafe.Pointer(&i))
 }
 
 // 关闭连接
-func (tcpClient *TcpClient) Close() error {
+func (tcpClient *TcpClient) Close() (err error) {
 	if tcpClient != nil && tcpClient.conn != nil {
-		return tcpClient.conn.Close()
+		err = tcpClient.conn.Close()
 	}
-	return nil
+	if tcpClient != nil && tcpClient.remoteConn != nil {
+		err = tcpClient.remoteConn.Close()
+	}
+	return err
 }
 
 // 状态处理
@@ -87,11 +94,12 @@ func (tcpClient *TcpClient) Serv() (err error) {
 		case StatusClosing:
 			err = tcpClient.handleClose()
 		case StatusClosed:
-			return tcpClient.err
+			return tcpClient.LastErr()
 		}
 
 		if err != nil {
-			tcpClient.err = err
+			tcpClient.setErr(err)
+			tcpClient.Close()
 			break
 		}
 	}
@@ -99,18 +107,19 @@ func (tcpClient *TcpClient) Serv() (err error) {
 }
 
 func (tcpClient *TcpClient) handleFullDuplexComm() (err error) {
-	// 全双工通讯
+	// 双向通讯
+	// TODO: @wanglanwei 移除io.copy实现方式，增加channel处理
 	tcpClient.status = StatusFullDuplexComm
 	done := make(chan struct{}, 1)
 	go func() {
 		_, err := io.Copy(tcpClient.remoteConn, tcpClient.conn)
 		if err != nil && err != io.EOF {
-			tcpClient.err = err
+			tcpClient.setErr(err)
 		}
 		done <- struct{}{}
 	}()
 	_, err = io.Copy(tcpClient.conn, tcpClient.remoteConn)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return err
 	}
 	<-done
@@ -147,17 +156,17 @@ func (tcpClient *TcpClient) handleRemoteConn() error {
 	case AddrFamilyDomain:
 		// 解析域名
 		// 数据格式：|--len--|--domain--|--port--|
-		tiny := make([]byte, 1, 1)
-		n, err := io.ReadFull(tcpClient.conn, tiny) // 1字节长度
+		domainLength := make([]byte, 1, 1)
+		n, err := io.ReadFull(tcpClient.conn, domainLength) // 1字节长度
 		if err != nil {
 			return err
 		}
 		if n != 1 {
 			return BadRequest
 		}
-		data := make([]byte, int(tiny[0])+2, int(tiny[0])+2) // length字节域名，2字节端口
+		data := make([]byte, int(domainLength[0])+2, int(domainLength[0])+2)
 		n, err = io.ReadFull(tcpClient.conn, data)
-		if n != (int(tiny[0]) + 2) {
+		if n != (int(domainLength[0]) + 2) {
 			return BadRequest
 		}
 		host = string(data[:n-2])
@@ -188,11 +197,12 @@ func (tcpClient *TcpClient) handleRemoteConn() error {
 
 	// 连接目标主机
 	timeout := time.Duration(tcpClient.tcpSrv.Config().RemoteConnTimeout)
-	conn, err := net.DialTimeout("tcp", tcpClient.remoteAddress, timeout*time.Millisecond)
+	conn, err := net.DialTimeout(ProtoTCP, tcpClient.remoteAddress, timeout*time.Millisecond)
 	if err != nil {
 		return err
 	}
 	// 响应客户端
+	// TODO: @wanglanwei 优化细节
 	_, err = tcpClient.conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	if err != nil {
 		return err
@@ -203,17 +213,12 @@ func (tcpClient *TcpClient) handleRemoteConn() error {
 }
 
 func (tcpClient *TcpClient) handleClose() (err error) {
-	if tcpClient.conn != nil {
-		err = tcpClient.conn.Close()
-	}
-	if tcpClient.remoteConn != nil {
-		err = tcpClient.remoteConn.Close()
-	}
+	err = tcpClient.Close()
 	tcpClient.status = StatusClosed
 	return err
 }
 
-// SOCKS5握手协议
+// Socks5协议握手
 func (tcpClient *TcpClient) handleCSTalk() error {
 	syncHeader := &TcpSyncHeader{}
 	err := binary.Read(tcpClient.conn, binary.LittleEndian, syncHeader)
@@ -223,7 +228,7 @@ func (tcpClient *TcpClient) handleCSTalk() error {
 	if syncHeader.Version != MagicVersion {
 		return BadRequest
 	}
-	methods := make([]byte, MaxMethodCount, MaxMethodCount)
+	methods := make([]byte, MaxMethodSize, MaxMethodSize)
 	n, err := tcpClient.conn.Read(methods)
 	if err != nil {
 		return err
@@ -234,9 +239,8 @@ func (tcpClient *TcpClient) handleCSTalk() error {
 	// 检测客户端同步的认证方法，Server端是否支持
 	var method byte = NoAcceptableMethods
 	for i := 0; i < n; i++ {
-		// TODO: @wanglanwei 认证方法先写死，后续扩展
-		if methods[i] == NoAuthorization {
-			method = NoAuthorization
+		if methods[i] == tcpClient.AuthMethod {
+			method = tcpClient.AuthMethod
 			break
 		}
 	}
@@ -257,4 +261,9 @@ func (tcpClient *TcpClient) handleCSTalk() error {
 		return nil
 	}
 	return BadRequest
+}
+
+// 析构函数，析构时释放本地与远程连接
+func finalizer(obj *TcpClient) {
+	obj.Close()
 }

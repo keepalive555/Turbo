@@ -7,19 +7,14 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
-// Tcp Server配置
-type TcpConfig struct {
-	MaxConnections     int    // 客户端最大连接数
-	Host               string // 监听主机
-	Port               int    // 监听端口
-	LocalReadTimeout   int    // 本地读超时，单位：毫秒
-	LocalWriteTimeout  int    // 本地写超时，单位：毫秒
-	RemoteConnTimeout  int    // 远程连接超时，单位：毫秒
-	RemoteReadTimeout  int    // 远程读超时，单位：毫秒
-	RemoteWriteTimeout int    // 远程写超时，单位：毫秒
-}
+const (
+	SrvStatusStopped  int = 0x00 // 服务器已停止
+	SrvStatusRunning      = 0x01 // 服务器正在运行
+	SrvStatusStopping     = 0x03 // 服务器正在停止
+)
 
 type TcpServer struct {
 	host       string           // 主机
@@ -27,9 +22,8 @@ type TcpServer struct {
 	config     *TcpConfig       // 服务器配置
 	listener   *net.TCPListener // Listener
 	statusLock sync.Mutex       // 状态变更的锁
-	quit       bool             // 是否退出
-	running    bool             // 运行中
-	stopped    bool             // 已停止
+	done       chan struct{}    // Server退出
+	status     int              // 服务器状态
 }
 
 func (tcpSrv *TcpServer) Proto() string {
@@ -45,29 +39,50 @@ func (tcpSrv *TcpServer) Config() *TcpConfig {
 }
 
 func (tcpSrv *TcpServer) Run() error {
-	if tcpSrv.running {
-		return OperationAlreadyDone
+	tcpSrv.statusLock.Lock()
+	if tcpSrv.status == SrvStatusRunning {
+		tcpSrv.statusLock.Unlock()
+		return ServerAlreadyStarted
 	}
-	ln, err := net.Listen("tcp", tcpSrv.Address())
+	ln, err := net.Listen(ProtoTCP, tcpSrv.Address())
 	if err != nil {
+		tcpSrv.statusLock.Unlock()
 		return err
 	}
+	fmt.Printf("server <%s> startted!!!\n", tcpSrv.Address())
 	tcpSrv.listener = ln.(*net.TCPListener)
-	tcpSrv.running = true
+	tcpSrv.status = SrvStatusRunning
+	tcpSrv.done = make(chan struct{})
+	tcpSrv.statusLock.Unlock()
 
-	for !tcpSrv.quit {
-		conn, err := tcpSrv.listener.Accept()
+	for tcpSrv.status == SrvStatusRunning {
+		err := tcpSrv.listener.SetDeadline(time.Now().Add(time.Second))
 		if err != nil {
+			fmt.Printf("[fatal] accept timeout failed, err=%+v\n", err)
 			continue
 		}
+		conn, err := tcpSrv.listener.Accept()
+		if err != nil {
+			op, ok := err.(*net.OpError)
+			if ok && op.Timeout() {
+				// Accept超时
+				continue
+			}
+			if ok && op.Temporary() {
+				// 被信号唤醒，处理信号
+				continue
+			}
+			fmt.Printf("unknown error <%+v>\n", err)
+		}
+		// 处理连接
 		tcpSrv.handleConn(conn)
 	}
+	close(tcpSrv.done)
 
 	return nil
 }
 
 func (tcpSrv *TcpServer) handleConn(conn net.Conn) {
-	fmt.Printf("accept an new connection <%s>\n", conn.RemoteAddr())
 	go func() {
 		tcpClient := newTcpClient(conn, tcpSrv)
 		defer tcpClient.Close()
@@ -78,8 +93,17 @@ func (tcpSrv *TcpServer) handleConn(conn net.Conn) {
 }
 
 func (tcpSrv *TcpServer) Stop() error {
-	tcpSrv.quit = true
-	// 等待所有线程结束
+	tcpSrv.statusLock.Lock()
+	defer tcpSrv.statusLock.Unlock()
+
+	if tcpSrv.status == SrvStatusStopping || tcpSrv.status == SrvStatusStopped {
+		return ServerAlreadyStopped
+	}
+
+	tcpSrv.status = SrvStatusStopping
+	<-tcpSrv.done // 等待Server退出
+	tcpSrv.status = SrvStatusStopped
+
 	return nil
 }
 
