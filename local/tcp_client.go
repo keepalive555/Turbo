@@ -1,7 +1,7 @@
 // @Author: wanglanwei@baidu.com
 // @Description: Socks5 客户端
 // @Reference: https://tools.ietf.org/html/rfc1928
-package server
+package local
 
 import (
 	"encoding/binary"
@@ -33,6 +33,7 @@ const (
 
 type TcpClient struct {
 	tcpSrv        *TcpServer     // tcp服务器
+	config        *TcpConfig     // tcp配置（包含服务端与客户端配置）
 	conn          *net.TCPConn   // tcp连接
 	err           unsafe.Pointer // 客户端lastErr
 	authMethod    byte           // 认证方法
@@ -42,10 +43,11 @@ type TcpClient struct {
 }
 
 // 新建Tcp客户端
-func newTcpClient(conn net.Conn, tcpSrv *TcpServer) *TcpClient {
+func newTcpClient(conn net.Conn, tcpSrv *TcpServer, config *TcpConfig) *TcpClient {
 	client := &TcpClient{
 		conn:       conn.(*net.TCPConn),
 		tcpSrv:     tcpSrv,
+		config:     config,
 		err:        nil,
 		authMethod: NoAuthorization,
 	}
@@ -196,7 +198,7 @@ func (tcpClient *TcpClient) handleRemoteConn() error {
 	fmt.Printf("remote host: %s\n", tcpClient.remoteAddress)
 
 	// 连接目标主机
-	timeout := time.Duration(tcpClient.tcpSrv.Config().RemoteConnTimeout)
+	timeout := time.Duration(tcpClient.config.RemoteConnTimeout)
 	conn, err := net.DialTimeout(ProtoTCP, tcpClient.remoteAddress, timeout*time.Millisecond)
 	if err != nil {
 		return err

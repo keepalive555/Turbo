@@ -1,7 +1,7 @@
 // @Author: wanglanwei@baidu.com
 // @Description: Socks5 Tcp Server
 // @Reference: https://tools.ietf.org/html/rfc1928
-package server
+package local
 
 import (
 	// "errors"

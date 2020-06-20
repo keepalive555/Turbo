@@ -1,7 +1,8 @@
-package server
+package local
 
 import (
 	"errors"
+	"time"
 )
 
 const (
@@ -9,10 +10,23 @@ const (
 	ProtoUDP = "udp"
 )
 
+// 连接信息
+type Connections struct {
+	TotalConnectionCount int64
+	ConnectionCount      int64
+}
+
+// 统计信息
+type Statistics struct {
+	StartTime time.Time // 启动时间
+	Connections
+}
+
 // 异常
 var (
 	BadArguments         = errors.New("bad arguments")
 	UnknownProto         = errors.New("unknown proto")
+	NotImplementedYet    = errors.New("not implemented yet")
 	BadRequest           = errors.New("bad request")
 	ServerAlreadyStarted = errors.New("server already started")
 	ServerAlreadyStopped = errors.New("server already stopped")
